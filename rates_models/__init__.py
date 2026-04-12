@@ -15,6 +15,12 @@ from rates_models.lmm import (
     simulate_lmm_spot_measure,
 )
 from rates_models.sabr import sabr_implied_vol_lognormal, sabr_normal_vol
+from rates_models.arbitrage_repair import (
+    RepairResult,
+    project_call_prices_l2,
+    repair_price_surface,
+    repair_vol_surface_black76,
+)
 
 __all__ = [
     "black76_price",
@@ -27,4 +33,8 @@ __all__ = [
     "price_caplet_lmm_mc",
     "simulate_instantaneous_forwards_gaussian_hjm",
     "caplet_black_vol_from_gaussian_hjm",
+    "RepairResult",
+    "project_call_prices_l2",
+    "repair_price_surface",
+    "repair_vol_surface_black76",
 ]
