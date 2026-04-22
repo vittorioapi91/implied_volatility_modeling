@@ -22,7 +22,12 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import Bounds, minimize
 
-from rates_models.arbitrage import _grid_from_long, validate_price_surface, validate_vol_surface
+from rates_models.arbitrage import (
+    _grid_from_long,
+    validate_price_surface,
+    validate_vol_surface,
+    validate_vol_surface_per_expiry_black76,
+)
 from rates_models.black76 import black76_implied_vol, black76_price
 
 
@@ -235,5 +240,113 @@ def repair_vol_surface_black76(
             iterations=it,
             report_after=final,
             details={"sigma_matrix": sig_work, "strikes": u_k, "expiries": u_t},
+        ),
+    )
+
+
+def repair_vol_bergeron_grid_black76(
+    sigma: np.ndarray,
+    *,
+    strikes: np.ndarray,
+    tenors: np.ndarray,
+    forward: float,
+    discount: float = 1.0,
+    tol: float = 1e-9,
+    max_iter: int = 25,
+) -> tuple[np.ndarray, RepairResult]:
+    """
+    Repair an 8×5 style vol grid where **strikes vary by row** (tenor), as in the Bergeron
+    VAE demo. Alternates: (i) cumulative maximum on sticky-delta total variance
+    :math:`w=\\sigma^2 T` along tenor within each delta column, (ii) per-expiry L² projection
+    of Black–76 call prices onto the discrete no-arbitrage polyhedron, with implied-vol
+    reinversion.
+
+    ``sigma``, ``strikes`` share shape ``(n_tenors, n_deltas)``; ``tenors`` is ``(n_tenors,)``.
+    """
+    sigma_work = np.asarray(sigma, dtype=float).copy()
+    strikes = np.asarray(strikes, dtype=float)
+    tenors = np.asarray(tenors, dtype=float)
+    if sigma_work.shape != strikes.shape:
+        raise ValueError("sigma and strikes must have the same shape.")
+    if tenors.ndim != 1 or tenors.shape[0] != sigma_work.shape[0]:
+        raise ValueError("tenors must be 1-D with length sigma.shape[0].")
+
+    n_t, n_d = sigma_work.shape
+    sig_init = sigma_work.copy()
+    hi_price = max(1.0, float(forward) * 2.0 * discount + 0.1)
+    Tcol = tenors.reshape(-1, 1)
+
+    it = 0
+    last_rep = validate_vol_surface_per_expiry_black76(
+        strikes, tenors, sigma_work, forward, discount, tol=tol
+    )
+    while it < max_iter:
+        it += 1
+        w = (sigma_work**2) * Tcol
+        w = np.maximum.accumulate(w, axis=0)
+        sigma_work = np.sqrt(np.maximum(w / Tcol, 1e-18))
+
+        for i in range(n_t):
+            order = np.argsort(strikes[i])
+            Ks = strikes[i, order]
+            sg = sigma_work[i, order]
+            t = float(tenors[i])
+            prices = np.array(
+                [
+                    black76_price(forward, float(Ks[j]), t, float(sg[j]), discount, "call")
+                    for j in range(n_d)
+                ]
+            )
+            try:
+                p_proj = project_call_prices_l2(
+                    prices,
+                    tol=max(tol * 1e-4, 1e-14),
+                    bounds_hi=hi_price,
+                )
+            except RuntimeError:
+                p_proj = prices
+            sig_row = np.empty(n_d, dtype=float)
+            for j in range(n_d):
+                try:
+                    sig_row[j] = black76_implied_vol(
+                        forward,
+                        float(Ks[j]),
+                        t,
+                        float(p_proj[j]),
+                        discount,
+                        "call",
+                        bracket=(1e-10, 10.0),
+                    )
+                except ValueError:
+                    sig_row[j] = float(sg[j])
+            sigma_work[i, order] = sig_row
+
+        last_rep = validate_vol_surface_per_expiry_black76(
+            strikes, tenors, sigma_work, forward, discount, tol=tol
+        )
+        if last_rep.ok:
+            l2_sigma = float(np.sqrt(np.sum((sigma_work - sig_init) ** 2)))
+            return (
+                sigma_work,
+                RepairResult(
+                    ok=True,
+                    l2_delta=l2_sigma,
+                    max_abs_change=float(np.max(np.abs(sigma_work - sig_init))),
+                    iterations=it,
+                    report_after=last_rep,
+                    details={"sigma_matrix": sigma_work, "strikes": strikes, "tenors": tenors},
+                ),
+            )
+
+    l2_sigma = float(np.sqrt(np.sum((sigma_work - sig_init) ** 2)))
+    return (
+        sigma_work,
+        RepairResult(
+            ok=last_rep.ok,
+            l2_delta=l2_sigma,
+            max_abs_change=float(np.max(np.abs(sigma_work - sig_init))),
+            iterations=it,
+            report_after=last_rep,
+            details={"sigma_matrix": sigma_work, "strikes": strikes, "tenors": tenors},
         ),
     )

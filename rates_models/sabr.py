@@ -26,18 +26,7 @@ def sabr_implied_vol_lognormal(
     eps = 1e-14
     f = max(forward, eps)
     k = max(strike, eps)
-    fk = f * k
     log_fk = math.log(f / k)
-
-    if abs(beta - 1.0) < 1e-12:
-        # beta -> 1: lognormal SABR (CEV beta=1)
-        term1 = alpha / (
-            fk ** 0.25 * (1.0 + (1.0 / 24.0) * log_fk**2 + (1.0 / 1920.0) * log_fk**4)
-        )
-        z = nu / alpha * log_fk
-        x_z = _x_rho(z, rho)
-        inner = 1.0 + ((1.0 / 24.0) * alpha**2 + (1.0 / 4.0 - rho**2 / 12.0) * nu**2) * time_to_expiry
-        return term1 * z / x_z * inner
 
     if abs(beta) < 1e-12:
         # beta = 0: normal SABR — caller may prefer sabr_normal_vol; this returns *Black* vol
@@ -46,26 +35,32 @@ def sabr_implied_vol_lognormal(
         atm = max(0.5 * (f + k), eps)
         return sigma_n / atm
 
-    fk_mid = (f + k) * 0.5
-    term1_num = alpha * (1.0 + (1.0 - beta) ** 2 / 24.0 * log_fk**2 + (1.0 - beta) ** 4 / 1920.0 * log_fk**4)
-    term1_den = fk_mid ** (1.0 - beta) * (
-        1.0 + (1.0 - beta) ** 2 / 24.0 * (math.log(fk) ** 2) + (1.0 - beta) ** 4 / 1920.0 * (math.log(fk) ** 4)
+    one_minus_beta = 1.0 - beta
+    fk_pow = (f * k) ** (0.5 * one_minus_beta)
+    # Standard Hagan denominator in log-moneyness.
+    den = fk_pow * (
+        1.0
+        + (one_minus_beta**2 / 24.0) * log_fk**2
+        + (one_minus_beta**4 / 1920.0) * log_fk**4
     )
-    term1 = term1_num / term1_den
+    term1 = alpha / den
 
-    z = nu / alpha * (fk_mid ** (1.0 - beta)) * log_fk
-    x_z = _x_rho(z, rho)
+    z = (nu / alpha) * fk_pow * log_fk
 
     inner = (
         1.0
         + (
-            (1.0 - beta) ** 2 / 24.0 * alpha**2 / (fk_mid ** (2.0 - 2.0 * beta))
-            + 0.25 * rho * beta * nu * alpha / (fk_mid ** (1.0 - beta))
+            (one_minus_beta**2 / 24.0) * alpha**2 / ((f * k) ** one_minus_beta)
+            + 0.25 * rho * beta * nu * alpha / fk_pow
             + (2.0 - 3.0 * rho**2) / 24.0 * nu**2
         )
         * time_to_expiry
     )
-    return term1 * z / x_z * inner
+    # ATM branch uses analytic z/x -> 1 limit.
+    if abs(log_fk) < 1e-10:
+        sigma_atm = alpha / (f ** one_minus_beta)
+        return sigma_atm * inner
+    return term1 * _z_over_x(z, rho) * inner
 
 
 def sabr_normal_vol(
@@ -92,13 +87,21 @@ def sabr_normal_vol(
     )
 
     z = nu / alpha * (f - k)
-    x_z = _x_rho(z, rho)
     inner = 1.0 + (-(1.0 / 3.0) * rho**2 + 0.25) * nu**2 * time_to_expiry
-    return term1 * z / x_z * inner
+    return term1 * _z_over_x(z, rho) * inner
 
 
 def _x_rho(z: float, rho: float) -> float:
     """Hagan chi(z) function; stable for z near 0."""
-    if abs(z) < 1e-14:
-        return 1.0 - rho
+    # As z -> 0, chi(z) ~ z. Returning a constant here incorrectly forces
+    # z/chi(z) -> 0 and collapses ATM vols toward zero.
+    if abs(z) < 1e-10:
+        return z
     return math.log((math.sqrt(1.0 - 2.0 * rho * z + z * z) + z - rho) / (1.0 - rho))
+
+
+def _z_over_x(z: float, rho: float) -> float:
+    """Stable ratio z / chi(z) with correct limit 1 at z=0."""
+    if abs(z) < 1e-10:
+        return 1.0
+    return z / _x_rho(z, rho)

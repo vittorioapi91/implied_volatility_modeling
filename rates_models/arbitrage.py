@@ -12,6 +12,11 @@ Checks implemented (necessary conditions on a finite grid):
 - Calendar / total variance: w(K,T) = σ(K,T)² T non-decreasing in T at each strike
   (standard necessary condition for absence of calendar arbitrage in total-variance terms).
 
+For surfaces where **strikes vary by maturity** (e.g. delta grids), use
+:func:`validate_vol_surface_per_expiry_black76` plus optional
+:func:`check_total_variance_along_tenor_columns` instead of :func:`validate_vol_surface`,
+which requires a full rectangular strike×expiry matrix.
+
 These are standard discrete diagnostics; they do not replace full continuum Dupire-type
 constraints on an interpolated surface.
 """
@@ -78,18 +83,66 @@ def check_calls_butterfly(
     tol: float = 1e-10,
 ) -> list[str]:
     """
-    Discrete convexity: C[i-1] - 2C[i] + C[i+1] >= 0 for interior i.
+    Discrete convexity on a possibly non-uniform strike grid.
+
+    For K[i-1] < K[i] < K[i+1], convexity is equivalent to non-decreasing
+    divided differences:
+        (C[i+1]-C[i])/(K[i+1]-K[i]) >= (C[i]-C[i-1])/(K[i]-K[i-1]).
     """
     if prices.size < 3:
         return []
-    d2 = prices[:-2] - 2.0 * prices[1:-1] + prices[2:]
-    bad = d2 < -tol
+    k_l = strikes[1:-1] - strikes[:-2]
+    k_r = strikes[2:] - strikes[1:-1]
+    if np.any(k_l <= 0.0) or np.any(k_r <= 0.0):
+        raise ValueError("strikes must be strictly increasing for butterfly checks.")
+    slope_l = (prices[1:-1] - prices[:-2]) / k_l
+    slope_r = (prices[2:] - prices[1:-1]) / k_r
+    diff = slope_r - slope_l
+    bad = diff < -tol
     idx = np.where(bad)[0]
     out: list[str] = []
     for j, i in enumerate(idx):
         k0, k1, k2 = strikes[i], strikes[i + 1], strikes[i + 2]
         out.append(
-            f"Butterfly at K={k1:.6g}: C({k0:.6g})-2C({k1:.6g})+C({k2:.6g})={d2[i]:.6g} < 0."
+            f"Butterfly at K={k1:.6g}: slope_right - slope_left = {diff[i]:.6g} < 0 "
+            f"for ({k0:.6g}, {k1:.6g}, {k2:.6g})."
+        )
+    return out
+
+
+def check_total_variance_along_tenor_columns(
+    sigma: np.ndarray,
+    tenors: np.ndarray,
+    tol: float = 1e-12,
+) -> list[str]:
+    """
+    For σ of shape ``(n_tenors, n_columns)`` and ``tenors`` of shape ``(n_tenors,)``,
+    check that ``w_ij = σ_ij² t_i`` is non-decreasing in **i** for each column **j**
+    (increasing tenor).
+
+    This is a common **heuristic** for sticky-delta style grids where strikes are not
+    aligned across maturities; it is **not** the same as the fixed-strike total-variance
+    condition in :func:`check_total_variance_calendar`.
+    """
+    sigma = np.asarray(sigma, dtype=float)
+    tenors = np.asarray(tenors, dtype=float)
+    if sigma.shape[0] != tenors.shape[0]:
+        raise ValueError("tenors must have length sigma.shape[0].")
+    if sigma.shape[0] < 2:
+        return []
+    w = (sigma**2) * tenors[:, np.newaxis]
+    diff = np.diff(w, axis=0)
+    out: list[str] = []
+    for j in range(sigma.shape[1]):
+        col = diff[:, j]
+        bad_idx = np.where(col < -tol)[0]
+        if bad_idx.size == 0:
+            continue
+        i0 = int(bad_idx[0])
+        out.append(
+            "Sticky-delta total variance: w=σ²T decreases between "
+            f"T={tenors[i0]:.6g} and T={tenors[i0 + 1]:.6g} "
+            f"for column {j} (w={w[i0, j]:.6g} → {w[i0 + 1, j]:.6g})."
         )
     return out
 
@@ -156,6 +209,70 @@ def validate_price_surface(
     # handled via total variance in validate_vol_surface.
 
     return ArbitrageReport(ok=len(violations) == 0, violations=violations, details={"strikes": u_k, "expiries": u_t})
+
+
+def validate_vol_surface_per_expiry_black76(
+    strikes: np.ndarray,
+    expiries: np.ndarray,
+    sigma: np.ndarray,
+    forward: float,
+    discount: float = 1.0,
+    tol: float = 1e-10,
+    *,
+    check_sticky_delta_total_var: bool = True,
+) -> ArbitrageReport:
+    """
+    Black–76 diagnostics when each expiry has its **own** strike set (no full K×T rectangle).
+
+    ``strikes`` and ``sigma`` share shape ``(n_expires, n_strikes_per_expiry)``; row ``i``
+    uses expiry ``expiries[i]`` for all entries in that row. For each expiry, strikes are
+    sorted, call prices are built from σ, and :func:`check_calls_strike_monotonicity` and
+    :func:`check_calls_butterfly` are applied.
+
+    Optionally (default True), also runs :func:`check_total_variance_along_tenor_columns`
+    on ``sigma`` (sticky-delta style total variance along tenor for each column).
+    """
+    strikes = np.asarray(strikes, dtype=float)
+    expiries = np.asarray(expiries, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    if strikes.shape != sigma.shape:
+        raise ValueError("strikes and sigma must have the same shape.")
+    if expiries.ndim != 1 or expiries.shape[0] != strikes.shape[0]:
+        raise ValueError("expiries must be 1-D with length strikes.shape[0].")
+
+    violations: list[str] = []
+    for i in range(strikes.shape[0]):
+        T = float(expiries[i])
+        ks = strikes[i, :].copy()
+        sg = sigma[i, :].copy()
+        order = np.argsort(ks)
+        ks = ks[order]
+        sg = sg[order]
+        prices = np.array(
+            [
+                black76_price(forward, float(k), T, float(s), discount, "call")
+                for k, s in zip(ks, sg, strict=True)
+            ]
+        )
+        violations.extend(
+            [f"[T={T:.6g}] {m}" for m in check_calls_strike_monotonicity(prices, ks, tol)]
+        )
+        violations.extend(
+            [f"[T={T:.6g}] {b}" for b in check_calls_butterfly(prices, ks, tol)]
+        )
+
+    if check_sticky_delta_total_var:
+        violations.extend(
+            check_total_variance_along_tenor_columns(
+                sigma, expiries, tol=max(tol, 1e-14)
+            )
+        )
+
+    return ArbitrageReport(
+        ok=len(violations) == 0,
+        violations=violations,
+        details={"strikes": strikes, "expiries": expiries, "sigma": sigma},
+    )
 
 
 def validate_vol_surface(

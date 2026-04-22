@@ -3,7 +3,13 @@
 import numpy as np
 
 from rates_models.arbitrage import validate_price_surface, validate_vol_surface
-from rates_models.arbitrage_repair import repair_price_surface, repair_vol_surface_black76
+from rates_models.arbitrage import validate_vol_surface_per_expiry_black76
+from rates_models.arbitrage_repair import (
+    repair_price_surface,
+    repair_vol_bergeron_grid_black76,
+    repair_vol_surface_black76,
+)
+from rates_models.vae_vol_bergeron import TENORS_YEARS, strikes_for_bergeron_grid
 from rates_models.black76 import black76_price
 
 
@@ -34,3 +40,20 @@ def test_repair_vol_calendar_break() -> None:
     assert not validate_vol_surface(s, e, v, 0.03).ok
     _, _, _, rep = repair_vol_surface_black76(s, e, v, 0.03, tol=1e-8)
     assert rep.ok
+
+
+def test_repair_bergeron_grid_runs_and_often_feasible() -> None:
+    """Bergeron-shaped repair alternates sticky variance and per-expiry price projection."""
+    from rates_models.vae_vol_bergeron import make_synthetic_sabr_surfaces
+
+    rng = np.random.default_rng(0)
+    s = make_synthetic_sabr_surfaces(1, rng=rng)
+    K = strikes_for_bergeron_grid(0.03)
+    mat = s[0].reshape(len(TENORS_YEARS), K.shape[1])
+    mat_r, rep = repair_vol_bergeron_grid_black76(
+        mat, strikes=K, tenors=TENORS_YEARS, forward=0.03, max_iter=20
+    )
+    assert mat_r.shape == mat.shape
+    assert np.all(np.isfinite(mat_r))
+    v = validate_vol_surface_per_expiry_black76(K, TENORS_YEARS, mat_r, 0.03)
+    assert rep.ok == v.ok
