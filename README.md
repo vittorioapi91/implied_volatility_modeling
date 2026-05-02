@@ -5,7 +5,7 @@ This repository explores **interest-rate implied volatility**: classical pricing
 ## Notebooks
 
 - **`volatility_surfaces.ipynb`** — Visual surfaces for Black–76 (flat vol), SABR smiles, and a piecewise caplet-style slice (LMM-flavored, flat in strike).
-- **`arbitrage_repair.ipynb`** — Intuition and demos for repair vs validation.
+- **`arbitrage_repair.ipynb`** — Repair & validation of volatility surfaces.
 - **`vae_volatility_surface.ipynb`** — Main VAE workflow: baseline vs arbitrage-aware training, imputation, Monte Carlo-style diagnostics.
 - **`vae_cnn_volatility_surface.ipynb`** — Convolutional encoder variant on the same grid and mixed SABR+SSVI setup.
 
