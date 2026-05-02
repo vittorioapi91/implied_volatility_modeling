@@ -9,8 +9,9 @@ passed into a **pointwise decoder** (two hidden layers of 32 units). The encoder
 two hidden layers of 32 units mapping the 40-D vol vector to Gaussian latent parameters.
 
 Training uses the standard ELBO (reconstruction + KL). **Synthetic** SABR surfaces are
-used by default so the module runs without proprietary FX data; replace
-``make_synthetic_sabr_surfaces`` with historical surfaces for production.
+used by default so the module runs without proprietary FX data; an SSVI generator is
+also provided for a second classical process. Replace synthetic generators with
+historical surfaces for production.
 
 **Imputation (paper step 2):** given observed entries on the grid, optimize the latent
 vector z to minimize MSE on observed points (decoder fixed).
@@ -24,7 +25,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from rates_models.sabr import sabr_implied_vol_lognormal
+from helper_module.sabr import sabr_implied_vol_lognormal
 
 if TYPE_CHECKING:
     import torch
@@ -45,9 +46,23 @@ def _require_torch():
         import torch.nn as nn  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "rates_models.vae_vol_bergeron requires PyTorch. Install with: pip install 'torch>=2.0'"
+            "helper_module.vae_vol_surface requires PyTorch. Install with: pip install 'torch>=2.0'"
         ) from e
     return torch
+
+
+def pick_torch_training_device() -> str:
+    """
+    Default accelerator for training/inference: NVIDIA CUDA, else Apple Silicon MPS,
+    else CPU. On macOS without NVIDIA GPU you typically want MPS rather than CPU.
+    """
+    torch = _require_torch()
+    if torch.cuda.is_available():
+        return "cuda"
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def build_coordinate_features() -> np.ndarray:
@@ -73,7 +88,7 @@ def strikes_for_bergeron_grid(forward: float) -> np.ndarray:
     Black-76 strikes ``K[i, j]`` at tenor ``i`` and delta ``j``, using the same
     ``_rough_strike_from_delta`` mapping as :func:`make_synthetic_sabr_surfaces`.
     Use with a vol matrix of shape ``(len(TENORS_YEARS), len(DELTAS))`` when running
-    discrete no-arbitrage checks (e.g. :func:`rates_models.arbitrage.validate_vol_surface`).
+    discrete no-arbitrage checks (e.g. :func:`helper_module.arbitrage.validate_vol_surface`).
     """
     out = np.empty((len(TENORS_YEARS), len(DELTAS)), dtype=np.float64)
     for i, T in enumerate(TENORS_YEARS):
@@ -104,6 +119,81 @@ def make_synthetic_sabr_surfaces(
                 out[s, idx] = sabr_implied_vol_lognormal(
                     forward, K, float(T), alpha, beta, rho, nu
                 )
+                idx += 1
+    return out
+
+
+def _ssvi_total_variance(k: float, theta: float, rho: float, eta: float, gamma: float) -> float:
+    """
+    SSVI total variance (Gatheral-Jacquier style):
+
+      w(k, theta) = 0.5 * theta * [1 + rho * phi(theta) * k
+                  + sqrt((phi(theta) * k + rho)^2 + (1 - rho^2))]
+
+    with phi(theta) = eta / theta^gamma.
+    """
+    th = max(theta, 1e-10)
+    rho_c = max(min(rho, 0.999), -0.999)
+    gam = min(max(gamma, 0.0), 0.99)
+    ph = eta / max(th**gam, 1e-12)
+    x = ph * k + rho_c
+    root = math.sqrt(max(x * x + (1.0 - rho_c * rho_c), 1e-14))
+    return 0.5 * th * (1.0 + rho_c * ph * k + root)
+
+
+def make_synthetic_ssvi_surfaces(
+    n_samples: int,
+    rng: np.random.Generator | None = None,
+    forward: float = 0.03,
+) -> np.ndarray:
+    """
+    Random SSVI slices (Gatheral-Jacquier style) -> 40-point implied-vol surfaces.
+
+    Notes
+    -----
+    - SSVI is parameterized on **total variance** per maturity.
+    - We sample smooth tenor-dependent SSVI parameters and evaluate at the project grid
+      strikes (same ``_rough_strike_from_delta`` mapping used by the SABR generator).
+    - This generator is classical and non-ML, intended as an alternative synthetic
+      process to SABR for VAE calibration experiments.
+    """
+    rng = rng or np.random.default_rng()
+    out = np.zeros((n_samples, N_GRID), dtype=np.float64)
+    K_grid = strikes_for_bergeron_grid(forward)
+
+    for s in range(n_samples):
+        # Global SSVI priors per surface.
+        rho0 = float(rng.uniform(-0.65, 0.65))
+        eta0 = float(rng.uniform(0.25, 1.10))
+        gamma0 = float(rng.uniform(0.20, 0.70))
+
+        # Build a monotone ATM variance term structure (v_atm(T)).
+        v0 = float(rng.uniform(0.010, 0.040))
+        v_slope = float(rng.uniform(0.000, 0.035))
+        v_curve = float(rng.uniform(-0.004, 0.010))
+
+        idx = 0
+        prev_v = 0.0
+        for i, T in enumerate(TENORS_YEARS):
+            # Smooth tenor evolution of SSVI params.
+            t_scale = math.sqrt(float(T))
+            rho = float(np.clip(rho0 + rng.normal(0.0, 0.05) * (0.7 + 0.2 * i), -0.95, 0.95))
+            eta = float(max(0.05, eta0 * (1.0 + rng.normal(0.0, 0.15))))
+            gamma = float(np.clip(gamma0 + rng.normal(0.0, 0.04), 0.05, 0.95))
+
+            v_atm = v0 + v_slope * t_scale + v_curve * float(T) + rng.normal(0.0, 0.0015)
+            # Keep ATM variance positive and weakly non-decreasing in tenor.
+            v_atm = float(max(v_atm, prev_v + 1e-4, 0.0025))
+            prev_v = v_atm
+            theta = float(T) * v_atm
+
+            for j in range(len(DELTAS)):
+                K = float(K_grid[i, j])
+                k = math.log(max(K / forward, 1e-12))
+                w = _ssvi_total_variance(k, theta, rho, eta, gamma)
+                # Keep total variance strictly positive.
+                w = max(w, 1e-10)
+                out[s, idx] = math.sqrt(w / float(T))
                 idx += 1
     return out
 
@@ -153,22 +243,27 @@ def black76_implied_vol_newton_torch(
 ) -> "torch.Tensor":
     """
     Batched implied σ from Black-76 price via monotone bisection (vega > 0).
-    Float64 interior for bracket accuracy; short tenors handled better than Newton.
+    Uses float64 interior on CUDA/CPU for bracket accuracy; MPS has no float64, so float32
+    there (slightly less margin at very short tenors).
     """
     torch = _require_torch()
     out_dtype = target_price.dtype
-    eps = 1e-14
-    F64 = F.to(torch.float64)
-    K64 = K.to(torch.float64)
-    T64 = torch.clamp(T.to(torch.float64), min=1e-12)
-    discount64 = discount.to(torch.float64)
-    price64 = target_price.to(torch.float64)
+    device = target_price.device
+    compute_dtype = (
+        torch.float32 if device.type == "mps" else torch.float64
+    )
+    eps = 1e-14 if compute_dtype == torch.float64 else 1e-7
+    F64 = F.to(compute_dtype)
+    K64 = K.to(compute_dtype)
+    T64 = torch.clamp(T.to(compute_dtype), min=1e-12)
+    discount64 = discount.to(compute_dtype)
+    price64 = target_price.to(compute_dtype)
     intrinsic = torch.clamp(F64 - K64, min=0.0) * discount64
     upper = F64 * discount64
-    price = torch.clamp(price64, min=intrinsic + 1e-15, max=upper - 1e-15)
+    price = torch.clamp(price64, min=intrinsic + max(eps, 1e-15), max=upper - max(eps, 1e-15))
 
-    lo = torch.full_like(price, sigma_lo, dtype=torch.float64)
-    hi = torch.full_like(price, float(sigma_hi), dtype=torch.float64)
+    lo = torch.full_like(price, sigma_lo, dtype=compute_dtype)
+    hi = torch.full_like(price, float(sigma_hi), dtype=compute_dtype)
     # Ensure Black(hi) >= price everywhere (expand upper bracket if needed).
     for _ in range(14):
         p_hi = black76_call_torch(F64, K64, T64, hi, discount64)
@@ -238,7 +333,7 @@ class ArbitrageAwareConfig:
     fraction of total loss. The prior penalty trains ``decode(z)`` for ``z \\sim
     \\mathcal{N}(0,I)``, matching **sampling** at inference (reconstruction-only
     penalties often ignore that path). None of this **guarantees** a feasible surface;
-    for a hard guarantee on the grid, apply :func:`rates_models.arbitrage_repair.repair_vol_bergeron_grid_black76` after decoding.
+    for a hard guarantee on the grid, apply :func:`helper_module.arbitrage_repair.repair_vol_bergeron_grid_black76` after decoding.
 
     **Constrained decoder:** If ``constrained_strike_decoder`` is True, the decoder outputs
     (per expiry) five logits that are turned into **call prices** that satisfy **strike**
@@ -442,7 +537,7 @@ def train_vae(
     """
     torch = _require_torch()
     config = config or TrainConfig()
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = device or pick_torch_training_device()
     dev = torch.device(device)
 
     x = torch.tensor(surfaces, dtype=torch.float32, device=dev)
@@ -483,14 +578,14 @@ def repair_surfaces_bergeron(
 ) -> np.ndarray | tuple[np.ndarray, dict[str, object]]:
     """
     Project each training surface (n, 40) onto the discrete no-arbitrage set used in
-    :func:`rates_models.arbitrage_repair.repair_vol_bergeron_grid_black76` (same strike
+    :func:`helper_module.arbitrage_repair.repair_vol_bergeron_grid_black76` (same strike
     grid as synthetic SABR).
 
     Imported lazily so the rest of this module loads even if an older ``arbitrage_repair``
     is cached until a notebook reloads it.
     """
-    from rates_models.arbitrage_repair import repair_vol_bergeron_grid_black76
-    from rates_models.arbitrage import validate_vol_surface_per_expiry_black76
+    from helper_module.arbitrage_repair import repair_vol_bergeron_grid_black76
+    from helper_module.arbitrage import validate_vol_surface_per_expiry_black76
 
     K = strikes_for_bergeron_grid(forward)
     n_t, n_d = len(TENORS_YEARS), len(DELTAS)
@@ -556,7 +651,7 @@ def _project_bergeron_noarb_layer_torch(
     Project each (tenor, delta) surface in a batch to the Bergeron-grid no-arb set.
     Forward output is projected; gradient is straight-through identity.
     """
-    from rates_models.arbitrage_repair import repair_vol_bergeron_grid_black76
+    from helper_module.arbitrage_repair import repair_vol_bergeron_grid_black76
 
     n_t, n_d = len(TENORS_YEARS), len(DELTAS)
     if sigma.ndim != 3 or sigma.shape[1:] != (n_t, n_d):
@@ -682,7 +777,7 @@ def train_vae_arbitrage_aware(
     torch = _require_torch()
     config = config or TrainConfig()
     arb_config = arb_config or ArbitrageAwareConfig()
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = device or pick_torch_training_device()
     dev = torch.device(device)
 
     if arb_config.repair_targets:
@@ -819,23 +914,6 @@ def train_vae_arbitrage_aware(
     return model, losses
 
 
-def encode_mean_surface(
-    model: object,
-    surface: np.ndarray,
-    device: str | None = None,
-) -> np.ndarray:
-    """Deterministic latent mean for a single surface (1, 40)."""
-    torch = _require_torch()
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    dev = torch.device(device)
-    model = model.to(dev)
-    model.eval()
-    x = torch.tensor(surface.reshape(1, -1), dtype=torch.float32, device=dev)
-    with torch.no_grad():
-        mu, _ = model.encode(x)
-    return mu.cpu().numpy().squeeze(0)
-
-
 def impute_surface_latent_search(
     model: object,
     observed_mask: np.ndarray,
@@ -862,7 +940,7 @@ def impute_surface_latent_search(
     """
     torch = _require_torch()
     config = config or TrainConfig()
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = device or pick_torch_training_device()
     dev = torch.device(device)
     model = model.to(dev)
     model.eval()
@@ -886,7 +964,7 @@ def impute_surface_latent_search(
 
 
 def main() -> None:
-    """Quick CPU demo: train on synthetic SABR, impute from partial observations."""
+    """Quick CPU demo: train on synthetic SABR/SSVI, impute from partial observations."""
     import argparse
 
     p = argparse.ArgumentParser(description="Train Bergeron et al. (2021) vol VAE demo.")
@@ -894,11 +972,21 @@ def main() -> None:
     p.add_argument("--n-samples", type=int, default=2000)
     p.add_argument("--latent", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--generator",
+        type=str,
+        choices=["sabr", "ssvi", "svi"],
+        default="sabr",
+        help="Synthetic surface generator for calibration data.",
+    )
     args = p.parse_args()
 
     rng = np.random.default_rng(args.seed)
     cfg = TrainConfig(epochs=args.epochs, latent_dim=args.latent)
-    data = make_synthetic_sabr_surfaces(args.n_samples, rng=rng)
+    if args.generator in {"ssvi", "svi"}:
+        data = make_synthetic_ssvi_surfaces(args.n_samples, rng=rng)
+    else:
+        data = make_synthetic_sabr_surfaces(args.n_samples, rng=rng)
     model, losses = train_vae(data, cfg)
     print("Final epoch loss:", losses[-1])
     # Impute: hide half the grid

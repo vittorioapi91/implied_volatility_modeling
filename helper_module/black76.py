@@ -1,4 +1,4 @@
-"""Black (1976) on forward rates + Bachelier (normal) for completeness."""
+"""Black (1976) on forward rates (e.g. caplets / swaptions)."""
 
 from __future__ import annotations
 
@@ -75,37 +75,3 @@ def black76_implied_vol(
             "Black implied vol: price not bracketed; adjust forward/strike/price or bracket."
         )
     return float(optimize.brentq(objective, lo, hi, xtol=1e-10, rtol=1e-10))
-
-
-def bachelier_price(
-    forward: float,
-    strike: float,
-    time_to_expiry: float,
-    sigma_n: float,
-    discount: float = 1.0,
-    option_type: Literal["call", "put"] = "call",
-) -> float:
-    """
-    Bachelier (normal) model: dF = sigma_n dW (sigma_n in rate units per sqrt year).
-
-    Call = D * ((F-K)*N(d) + sigma_n*sqrt(T)*n(d)), d = (F-K)/(sigma_n*sqrt(T)).
-    """
-    if time_to_expiry <= 0.0:
-        if option_type == "call":
-            return discount * max(forward - strike, 0.0)
-        return discount * max(strike - forward, 0.0)
-    if sigma_n <= 0.0:
-        if option_type == "call":
-            return discount * max(forward - strike, 0.0)
-        return discount * max(strike - forward, 0.0)
-
-    sqrt_t = math.sqrt(time_to_expiry)
-    d = (forward - strike) / (sigma_n * sqrt_t)
-    pdf = stats.norm.pdf(d)
-    if option_type == "call":
-        return discount * (
-            (forward - strike) * _phi(d) + sigma_n * sqrt_t * pdf
-        )
-    return discount * (
-        (strike - forward) * _phi(-d) + sigma_n * sqrt_t * pdf
-    )

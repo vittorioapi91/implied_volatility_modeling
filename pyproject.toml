@@ -1,7 +1,7 @@
 [project]
 name = "implied-volatility-modeling"
 version = "0.1.0"
-description = "Interest-rate implied volatility: Black-76, SABR, LMM, HJM"
+description = "Interest-rate implied volatility: Black-76, SABR"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
@@ -20,4 +20,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["rates_models*"]
+include = ["helper_module*"]

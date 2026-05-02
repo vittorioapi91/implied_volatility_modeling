@@ -2,15 +2,15 @@
 
 import numpy as np
 
-from rates_models.arbitrage import validate_price_surface, validate_vol_surface
-from rates_models.arbitrage import validate_vol_surface_per_expiry_black76
-from rates_models.arbitrage_repair import (
+from helper_module.arbitrage import validate_price_surface, validate_vol_surface
+from helper_module.arbitrage import validate_vol_surface_per_expiry_black76
+from helper_module.arbitrage_repair import (
     repair_price_surface,
     repair_vol_bergeron_grid_black76,
     repair_vol_surface_black76,
 )
-from rates_models.vae_vol_bergeron import TENORS_YEARS, strikes_for_bergeron_grid
-from rates_models.black76 import black76_price
+from helper_module.vae_vol_surface import TENORS_YEARS, strikes_for_bergeron_grid
+from helper_module.black76 import black76_price
 
 
 def test_repair_prices_demo_slice() -> None:
@@ -44,7 +44,7 @@ def test_repair_vol_calendar_break() -> None:
 
 def test_repair_bergeron_grid_runs_and_often_feasible() -> None:
     """Bergeron-shaped repair alternates sticky variance and per-expiry price projection."""
-    from rates_models.vae_vol_bergeron import make_synthetic_sabr_surfaces
+    from helper_module.vae_vol_surface import make_synthetic_sabr_surfaces
 
     rng = np.random.default_rng(0)
     s = make_synthetic_sabr_surfaces(1, rng=rng)

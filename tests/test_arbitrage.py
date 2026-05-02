@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from rates_models.arbitrage import (
+from helper_module.arbitrage import (
     check_calls_butterfly,
     check_total_variance_along_tenor_columns,
     check_total_variance_calendar,
@@ -11,7 +11,7 @@ from rates_models.arbitrage import (
     validate_vol_surface,
     validate_vol_surface_per_expiry_black76,
 )
-from rates_models.black76 import black76_price
+from helper_module.black76 import black76_price
 
 
 def test_valid_flat_vol_surface_passes() -> None:

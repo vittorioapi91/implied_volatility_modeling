@@ -7,8 +7,8 @@ pytest.importorskip("torch")
 
 import torch
 
-from rates_models.arbitrage import validate_vol_surface_per_expiry_black76
-from rates_models.vae_vol_bergeron import (
+from helper_module.arbitrage import validate_vol_surface_per_expiry_black76
+from helper_module.vae_vol_surface import (
     DELTAS,
     ArbitrageAwareConfig,
     TrainConfig,
@@ -32,10 +32,11 @@ def test_constrained_decoder_zero_strike_violations_after_training() -> None:
     )
     model, _ = train_vae_arbitrage_aware(s, cfg, arb)
     model.eval()
+    dev = next(model.parameters()).device
     K = strikes_for_bergeron_grid(0.03)
     with torch.no_grad():
-        z = torch.randn(6, cfg.latent_dim)
-        out = model.decode(z).numpy()
+        z = torch.randn(6, cfg.latent_dim, device=dev)
+        out = model.decode(z).cpu().numpy()
     for i in range(6):
         mat = out[i].reshape(len(TENORS_YEARS), len(DELTAS))
         rep = validate_vol_surface_per_expiry_black76(K, TENORS_YEARS, mat, 0.03)

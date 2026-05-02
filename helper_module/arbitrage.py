@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from rates_models.black76 import black76_price
+from helper_module.black76 import black76_price
 
 
 @dataclass

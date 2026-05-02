@@ -1,6 +1,6 @@
 """
 Repair option prices / Black–76 vol grids toward the closest arbitrage-free surface
-on a finite grid (in the senses implemented in :mod:`rates_models.arbitrage`).
+on a finite grid (in the senses implemented in :mod:`helper_module.arbitrage`).
 
 **Per-expiry call prices** (fixed T): Euclidean (L²) projection onto the polyhedron
 defined by discrete strike monotonicity and butterfly (convexity) inequalities.
@@ -22,13 +22,13 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import Bounds, minimize
 
-from rates_models.arbitrage import (
+from helper_module.arbitrage import (
     _grid_from_long,
     validate_price_surface,
     validate_vol_surface,
     validate_vol_surface_per_expiry_black76,
 )
-from rates_models.black76 import black76_implied_vol, black76_price
+from helper_module.black76 import black76_implied_vol, black76_price
 
 
 @dataclass

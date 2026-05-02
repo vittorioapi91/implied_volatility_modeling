@@ -5,10 +5,11 @@ import pytest
 
 pytest.importorskip("torch")
 
-from rates_models.vae_vol_bergeron import (
+from helper_module.vae_vol_surface import (
     N_GRID,
     TrainConfig,
     make_synthetic_sabr_surfaces,
+    make_synthetic_ssvi_surfaces,
     train_vae,
 )
 
@@ -21,3 +22,11 @@ def test_train_small() -> None:
     model, losses = train_vae(data, cfg)
     assert len(losses) == 2
     assert losses[-1] <= losses[0] * 1.5  # loose; may fluctuate slightly
+
+
+def test_ssvi_generator_shape_and_finite() -> None:
+    rng = np.random.default_rng(7)
+    data = make_synthetic_ssvi_surfaces(64, rng=rng)
+    assert data.shape == (64, N_GRID)
+    assert np.all(np.isfinite(data))
+    assert np.all(data > 0.0)
