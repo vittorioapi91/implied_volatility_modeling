@@ -4,18 +4,7 @@ This repository explores **interest-rate implied volatility**: classical pricing
 
 The Python package lives under **`helper_module/`** (installable as `implied-volatility-modeling`). Notebooks sit in **`notebooks/`** and are meant to be run from a checkout with the package installed in editable mode.
 
-## What’s in the box
-
-| Area | Role |
-|------|------|
-| **`helper_module/black76.py`** | Black–76 prices and implied volatility on forwards. |
-| **`helper_module/sabr.py`** | SABR implied volatility (lognormal and normal conventions). |
-| **`helper_module/arbitrage.py`** | Discrete checks: strike monotonicity, butterfly convexity, calendar / total-variance consistency where applicable; Black–76 diagnostics per expiry. |
-| **`helper_module/arbitrage_repair.py`** | L2 projection of prices or Black–76 vols toward surfaces that satisfy the same necessary conditions; Bergeron-grid repair helper for decoded surfaces. |
-| **`helper_module/vae_vol_surface.py`** | PyTorch VAE for surfaces on the Bergeron-style grid: synthetic **SABR / SSVI** training data, training with optional **arbitrage-aware** losses and **structurally constrained** strike decoders, latent **imputation**, CLI-style **`main`**. |
-| **`helper_module/vae_surface.py`** | Thin re-exports / aliases for notebook-friendly imports. |
-
-**Notebooks** (high level):
+## Notebooks
 
 - **`volatility_surfaces.ipynb`** — Visual surfaces for Black–76 (flat vol), SABR smiles, and a piecewise caplet-style slice (LMM-flavored, flat in strike).
 - **`arbitrage_repair.ipynb`** — Intuition and demos for repair vs validation.
