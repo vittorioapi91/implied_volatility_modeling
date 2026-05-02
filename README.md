@@ -2,8 +2,6 @@
 
 This repository explores **interest-rate implied volatility**: classical pricing primitives (Black–76, SABR), **discrete no-arbitrage diagnostics** on grids of calls or implied vols, optional **projection / repair** toward feasible surfaces, and **variational autoencoder** experiments that generate or regularize **volatility surfaces** on a fixed **tenor × delta** grid.
 
-The Python package lives under **`helper_module/`** (installable as `implied-volatility-modeling`). Notebooks sit in **`notebooks/`** and are meant to be run from a checkout with the package installed in editable mode.
-
 ## Notebooks
 
 - **`volatility_surfaces.ipynb`** — Visual surfaces for Black–76 (flat vol), SABR smiles, and a piecewise caplet-style slice (LMM-flavored, flat in strike).
